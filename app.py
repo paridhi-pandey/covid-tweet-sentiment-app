@@ -49,7 +49,6 @@ st.sidebar.markdown("""
 st.sidebar.markdown("---")
 st.sidebar.markdown("💡 Use the tabs to analyze single tweets or upload a CSV for batch prediction.")
 
-
 tab1, tab2 = st.tabs(["🔍 Predict Single Tweet", "📊 Batch Prediction (CSV)"])
 
 # --- Tab 1: Single Tweet ---
@@ -57,24 +56,20 @@ with tab1:
     st.title("🧠 Tweet Sentiment Classifier")
     st.markdown("Enter a tweet below or choose a sample to predict its **COVID-19 sentiment**.")
 
-    # --- Sample Tweets ---
-sample_tweets = {
-    "Sample 1": "The government needs to do more about this pandemic!",
-    "Sample 2": "Feeling blessed to work from home during COVID times.",
-    "Sample 3": "I'm tired of hearing about COVID-19 all the time.",
-}
+    sample_tweets = {
+        "Sample 1": "The government needs to do more about this pandemic!",
+        "Sample 2": "Feeling blessed to work from home during COVID times.",
+        "Sample 3": "I'm tired of hearing about COVID-19 all the time.",
+    }
 
-st.sidebar.markdown("## 🎯 Try Sample Tweets")
-for label, tweet in sample_tweets.items():
-    if st.sidebar.button(label):
-        st.session_state.tweet_input = tweet
+    st.sidebar.markdown("## 🎯 Try Sample Tweets")
+    for label, tweet in sample_tweets.items():
+        if st.sidebar.button(label):
+            st.session_state.tweet_input = tweet
 
-# --- Main Input ---
-tweet_input = st.text_area("📝 Enter a Tweet", value=st.session_state.get("tweet_input", ""), height=150)
+    tweet_input = st.text_area("📝 Enter a Tweet", value=st.session_state.get("tweet_input", ""), height=150)
 
-
-
-if st.button("🔮 Predict Sentiment"):
+    if st.button("🔮 Predict Sentiment"):
         if tweet_input.strip() == "":
             st.warning("Please enter or select a tweet.")
         else:
@@ -86,64 +81,74 @@ if st.button("🔮 Predict Sentiment"):
 # --- Tab 2: Batch CSV Upload ---
 with tab2:
     st.header("📤 Upload CSV for Bulk Prediction")
-    st.write("Upload a CSV file with a column named `tweet`.")
+    st.write("Upload a CSV file with a column named `tweet` or `OriginalTweet`.")
 
     uploaded_file = st.file_uploader("Choose a CSV file", type="csv")
 
     if uploaded_file:
+        # Try reading the CSV with UTF-8, then fallback to ISO-8859-1
         try:
-            df = pd.read_csv(uploaded_file, encoding='utf-8')
+            df = pd.read_csv(uploaded_file, encoding='utf-8', on_bad_lines='skip')
         except UnicodeDecodeError:
-            df = pd.read_csv(uploaded_file, encoding='ISO-8859-1')
+            uploaded_file.seek(0)
+            df = pd.read_csv(uploaded_file, encoding='ISO-8859-1', on_bad_lines='skip')
+
+        # If parsing failed (e.g., only 1 unnamed column), try again with no header
+        if len(df.columns) == 1:
+            uploaded_file.seek(0)
+            df = pd.read_csv(uploaded_file, encoding='ISO-8859-1', header=None, on_bad_lines='skip')
+            if df.shape[1] == 6:
+                df.columns = ['UserName', 'ScreenName', 'Location', 'TweetAt', 'OriginalTweet', 'Sentiment']
+            elif df.shape[1] == 1:
+                st.error("Could not determine columns. Please upload a properly formatted CSV.")
+                st.stop()
+
+        # Normalize column names to lowercase and check for required column
+        df.columns = [col.strip().lower() for col in df.columns]
+        if 'originaltweet' in df.columns:
+            df.rename(columns={'originaltweet': 'tweet'}, inplace=True)
 
         if 'tweet' not in df.columns:
-            st.error("CSV must contain a 'tweet' column.")
-        else:
-            df['clean_text'] = df['tweet'].astype(str).apply(preprocess)
-            X_vec = vectorizer.transform(df['clean_text'])
-            df['predicted_sentiment'] = model.predict(X_vec)
-            df['formatted_sentiment'] = df['predicted_sentiment'].apply(format_sentiment)
+            st.error("CSV must contain a 'tweet' or 'OriginalTweet' column (case-insensitive).")
+            st.stop()
 
-            # Sentiment filter
-            sentiments = df['predicted_sentiment'].unique().tolist()
-            selected = st.selectbox("🔎 Filter by Sentiment", ["All"] + sentiments)
-            if selected != "All":
-                filtered_df = df[df['predicted_sentiment'] == selected]
-            else:
-                filtered_df = df
+        # Preprocess and predict
+        df['clean_text'] = df['tweet'].astype(str).apply(preprocess)
+        X_vec = vectorizer.transform(df['clean_text'])
+        df['predicted_sentiment'] = model.predict(X_vec)
+        df['formatted_sentiment'] = df['predicted_sentiment'].apply(format_sentiment)
 
-            # Color tags for better visual output
-            def color_tag(sentiment):
-                colors = {
-                    'Positive': 'green',
-                    'Negative': 'red',
-                    'Neutral': 'gray'
-                }
-                return f"<span style='color:{colors.get(sentiment, 'black')}'>{sentiment}</span>"
+        # Filter
+        sentiments = df['predicted_sentiment'].unique().tolist()
+        selected = st.selectbox("🔎 Filter by Sentiment", ["All"] + sentiments)
+        filtered_df = df if selected == "All" else df[df['predicted_sentiment'] == selected]
 
-            st.markdown("### 📋 Predictions")
-            styled_df = filtered_df[['tweet', 'predicted_sentiment']].copy()
-            styled_df['predicted_sentiment'] = styled_df['predicted_sentiment'].apply(
-                lambda x: color_tag(x))
-            st.write(styled_df.to_html(escape=False), unsafe_allow_html=True)
+        # Display predictions with color
+        def color_tag(sentiment):
+            colors = {'Positive': 'green', 'Negative': 'red', 'Neutral': 'gray'}
+            return f"<span style='color:{colors.get(sentiment, 'black')}'>{sentiment}</span>"
 
-            # Sentiment Distribution Pie Chart
-            st.markdown("### 📊 Sentiment Distribution")
-            sentiment_counts = df['predicted_sentiment'].value_counts()
-            st.plotly_chart(px.pie(
-                names=sentiment_counts.index,
-                values=sentiment_counts.values,
-                title="Sentiment Breakdown",
-                color_discrete_sequence=px.colors.qualitative.Set3
-            ))
+        st.markdown("### 📋 Predictions")
+        styled_df = filtered_df[['tweet', 'predicted_sentiment']].copy()
+        styled_df['predicted_sentiment'] = styled_df['predicted_sentiment'].apply(color_tag)
+        st.write(styled_df.to_html(escape=False), unsafe_allow_html=True)
 
-            # Download Results
-            st.download_button("⬇️ Download Results as CSV",
-                               df.to_csv(index=False),
-                               file_name="predicted_sentiments.csv",
-                               mime="text/csv")
+        # Sentiment pie chart
+        st.markdown("### 📊 Sentiment Distribution")
+        sentiment_counts = df['predicted_sentiment'].value_counts()
+        st.plotly_chart(px.pie(
+            names=sentiment_counts.index,
+            values=sentiment_counts.values,
+            title="Sentiment Breakdown",
+            color_discrete_sequence=px.colors.qualitative.Set3
+        ))
 
-            # Reset Button
-            if st.button("🔄 Reset"):
-                st.experimental_rerun()
+        # Download CSV
+        st.download_button("⬇️ Download Results as CSV",
+                           df.to_csv(index=False),
+                           file_name="predicted_sentiments.csv",
+                           mime="text/csv")
 
+        # Reset
+        if st.button("🔄 Reset"):
+            st.experimental_rerun()
